@@ -1,33 +1,63 @@
-import express from 'express';
-import mongoose from 'mongoose';
-import dotenv from 'dotenv';
-import cors from 'cors';
-import helmet from 'helmet';
-import morgan from 'morgan';
-import cookieParser from 'cookie-parser';
+import express, { Application, NextFunction } from 'express';
+import connectDB from './frameworks/database/mongodb/connection';
+import http from 'http';
+import serverConfig from './frameworks/webserver/server';
+import expressConfig from './frameworks/webserver/express';
+import routes from './frameworks/webserver/routes';
+import connection from './frameworks/database/redis/connection';
+import colors from 'colors.ts';
+import errorHandlingMiddleware from './frameworks/webserver/middlewares/errorHandling';
+import configKeys from './config'; 
+import AppError from './utils/appError';
+import { ClientToServerEvents, InterServerEvents, ServerToClientEvents, SocketData } from './types/socketInterfaces';
+import { Server } from 'socket.io';
+import socketConfig from './frameworks/websocket/socket';
+import { authService } from './frameworks/services/authService';
 
-dotenv.config();
+colors?.enable();
 
-const app = express();
-const PORT = process.env.PORT || 4000;
+(async () => {
+  try {
+    //* Connect to MongoDB
+    await connectDB();
 
-// Middleware
-app.use(express.json());
-app.use(cors({ origin: process.env.ORIGIN || '*' }));
-app.use(helmet());
-app.use(morgan('dev'));
-app.use(cookieParser());
+    const app: Application = express();
+    const server = http.createServer(app);
 
-// Example Route
-app.get('/', (_req, res) => {
-  res.send('SkillSync Backend is running ✅');
-});
+    //* WebSocket setup
+    const io = new Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>(server, {
+      cors: {
+        origin: configKeys.ORIGIN_PORT,
+        methods: ['GET', 'POST'],
+      },
+    });
 
-// Mongo Connection
-mongoose
-  .connect(process.env.MONGO_URL!)
-  .then(() => {
-    console.log('✅ Connected to MongoDB');
-    app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-  })
-  .catch((err) => console.error('❌ MongoDB connection failed:', err));
+    socketConfig(io, authService());
+
+    //* Connect to Redis
+    const redisClient = connection().createRedisClient();
+
+    //* Express app configuration
+    expressConfig(app);
+
+    //* Register routes
+    routes(app, connection().createRedisClient); // ✅ correct
+
+
+    //* Error handling
+    app.use(errorHandlingMiddleware);
+
+    app.all('*', (req, res, next: NextFunction) => {
+      next(new AppError('Not found', 404));
+    });
+
+    //* Start HTTP server
+    serverConfig(server).startServer();
+
+  } catch (error) {
+    console.error('Fatal startup error:', error);
+    process.exit(1);
+  }
+})();
+
+export type RedisClient = ReturnType<typeof connection>['createRedisClient'];
